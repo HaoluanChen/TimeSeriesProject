@@ -1,0 +1,379 @@
+---
+title: "STA457 assignment"
+author: "Haoluan Chen"
+date: "3/12/2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(readxl)
+library(MASS)
+library(forecast)
+library(timeSeries)
+library(timeDate)
+library(sarima)
+```
+```{r functions, echo= FALSE}
+# =============================================#======
+# utility functions --prewhitening and LjungBox test
+# Author: Jen-Wen Lin
+#=====================================================
+
+# PreWhiten.ar   
+# Prewhitening time series x based on a fitted AR model
+# x: Time series to be transformed (n x 1 vector)
+# ar: Autoregressive coefficient estimates (p-1 x 1 vector)
+PreWhiten.ar<- function(x , ar = NULL){
+        if(is.null(ar)) print(" autoregressive coefficients are empty!")
+        pwData = numeric(0)
+        pwData = filter(x, c(1, -ar),method=c("convo"),sides=1) 
+        pwData[!is.na(pwData)]
+}
+
+# PreWhiten.arma   
+# Prewhitening time series x based on a fitted ARMA model
+# x: Time series to be transformed (n x 1 vector)
+# ar: Autoregressive coefficient estimates (p x 1 vector)
+# ma: Moving-average coefficient estimates (q x 1 vector)
+PreWhiten.arma<- function(x , ar = NULL, ma = 0){
+        if(is.null(ar) && is.null(ma)) print("both ar and ma coefficients are empty!")
+        pwData = numeric(0)
+        m = as(modelCoef(new("ArmaModel", ar = ar, ma = ma)), "list")
+        eps = numeric(length(x))
+        pwData = xarmaFilter(m, x =x, eps = eps, whiten = TRUE) 
+        pwData[!is.na(pwData)]
+}
+
+# LBTest   
+# Return thet p-values of Ljung-Box portmanteau tests for a fitted ARMA model
+# res: residuals from a fitted ARMA model  (n x 1 vector)
+# nPQ: # of model parameters (integer)
+# m: test inputs (integer)
+LBTest<- function(res, nPQ = 0, m = 24, ifPlot = FALSE){
+        stopifnot(nPQ >= 0, m >= 1, m > nPQ)
+        n <- length(res)
+        lags <- 1:m
+        df <- (nPQ+1):m 
+        ra <- (acf(res, lag.max = m, plot = FALSE)$acf)[-1]
+        QQ <- n * (n + 2) * cumsum((ra^2)/(n - (1:m)))[df]
+        
+        pv <- 1 - pchisq(QQ, df)
+        QQ <- round(QQ, 2)
+        a <- matrix(c(df, QQ, pv), ncol = 3)
+        dimnames(a) <- list(rep("", length(QQ)), c("m", "Qm", "pvalue"))
+        if(ifPlot){
+                plot(x = a[,1],y = a[,3],
+                     ylim = c(0,1), pch = 15, col =4,
+                     ylab = "p-value", xlab = "m",
+                     main = "Ljung-Box portmanteau test")
+                abline(h =0, col =2)
+                grid()
+        }else {
+                a
+        }
+}
+
+```
+
+  
+```{r data}
+GFluTrends<-read_excel("case_study_1_fluwatch.xlsx",sheet="Google Flu Trends", skip = 1)
+fluWatch<-read_excel("case_study_1_fluwatch.xlsx", sheet="FluWatch-BC", skip = 2)  
+
+tim<-timeSequence(from = "2003-09-28", to = "2015-08-09", by = "week") 
+
+tim1<-timeSequence(from = "2003-09-07", to = "2015-08-23", by = "week") 
+GFT<- timeSeries(GFluTrends[,"British Columbia"], charvec = tim)     
+fluTest<- timeSeries(fluWatch[,"FluTest"], charvec = tim1) 
+
+# Training and test sample
+GFT.obs = window(GFT, start = "2003-09-28", end = "2014-08-10")
+GFT.test = window(GFT, start = "2014-08-17", end = "2015-08-09")
+
+
+fluTest.obs = window(fluTest, start = "2003-09-28", end = "2014-08-10")
+fluTest.test = window(fluTest, start = "2014-08-17", end = "2015-08-09")
+```
+
+
+```{r model selection and adequacy}
+mod.arma<-auto.arima(GFT.obs, max.p = 52, max.q = 52, stationary = TRUE) 
+p = mod.arma$arma[1]; q = mod.arma$arma[2]
+
+coef(mod.arma)
+plot(mod.arma)
+npq = sum(mod.arma$arma[c(1,2)])
+LBTest(mod.arma$residuals, nPQ = npq, m = 52, ifPlot = TRUE)
+```
+
+As shown above, the p-values of the test statistics are well above the 5% significance level so the fitted model is adequacy.
+
+```{r Google Fle Trend lag selection}
+mod = mod.arma;nAR = mod$arma[1]; nMA = mod$arma[2]
+
+if(nMA!=0){
+  xf = PreWhiten.arma(GFT.obs, ar = mod$coef[1:nAR], 
+                      ma = mod$coef[(1:nMA)+nAR])[-(1:nAR)]
+  yf = PreWhiten.arma(fluTest.obs, ar = mod$coef[1:nAR], 
+                      ma=mod$coef[(1:nMA)+nAR])[-(1:nAR)]  
+}else{
+  xf = PreWhiten.arma(GFT.obs, ar = mod$coef[1:nAR], 
+                      ma = 0)[-(1:nAR)]
+  yf = PreWhiten.arma(fluTest.obs, ar = mod$coef[1:nAR], 
+                      ma=0)[-(1:nAR)] 
+}
+
+par(cex=0.75,bg="gray95")
+ccf(c(xf), c(yf), lwd=1, ylab="Cross-correlation functions",
+    main="CCF of prewhitened GFT and flu test")
+abline(v=0, col="gold", lwd=2, lty="dashed")
+text(-1, 0.2, "-1", col=2)
+```
+
+As shown above, we will include $GFT_t$ and $GFT_{t_1}$ in our transfer function noise model.
+
+
+```{r TFN model }
+y<-fluTest
+x<-GFT
+dat<- cbind(y,x, lag(x))[-c(1:4),]
+
+tim2<-timeSequence(from = "2003-10-05", to = "2015-08-23", by = "week") 
+colnames(dat)<-c("fluTest", "GFT", "GFT1")
+data<- timeSeries(dat, charvec = tim2)
+
+data.obs = window(data, start = "2003-10-05", end = "2014-08-10")
+data.test = window(data, start = "2014-08-17", end = "2015-08-09")
+
+
+mod.tfn = auto.arima(data.obs[,1], xreg = data.obs[,-1], stationary = TRUE)
+mod.tfn
+coef(mod.tfn)
+
+```
+Here is the fitted TFN model
+$$FluTest = -94.1375 + 0.0777GFT_t + 0.0587GFT_{t-1} + \eta_t$$
+$$\eta_t \sim ARMA(1,1)$$
+$$\eta_t - 0.829 \eta_{t-1} = a_t + 0.3667 a_{t-1}$$
+
+```{r adequacy}
+m = 26
+lags = 1:m
+df <- (3):m
+n = length(mod.tfn$res)
+rccf = ccf(mod$residuals,mod.tfn$residuals, plot = FALSE, lag.max = m)$acf[-(1:m)]
+Qm = n* (n + 2) * cumsum((rccf^2)/(n - (0:m)))[df]
+pv <- 1 - pchisq(Qm, df)
+a = cbind(df, Qm,pv)
+
+par(mfrow = c(1,2))
+LBTest(mod.tfn$res, nPQ = 6, ifPlot = TRUE)
+plot(x = a[,1],y = a[,3],
+     ylim = c(0,1), pch = 15, col =4,
+     ylab = "p-value", xlab = "m",
+     main = "Cross-correlation check")
+abline(h =0.05, col =2)
+grid()
+```
+
+From above plot, the p-values of the test statistics are well above the 5% significance level so the fitted model(TFN) is adequacy.
+
+```{r TFN model plot}
+par(mfrow = c(1,1), cex = 0.75)
+ts.plot(mod.tfn$fitted, ylab = "", main ="TFN model")
+lines(c(fluTest.obs), pch = 10, col = "green", type ="p")
+grid()
+
+
+```
+
+```{r arima on flutest}
+flu.arima<- auto.arima(fluTest.obs, max.p = 52, max.q = 52,stationary = TRUE)
+
+coef(flu.arima)
+par(mfrow = c(1,2))
+LBTest(flu.arima$res, nPQ = 6, ifPlot = TRUE)
+plot(x = a[,1],y = a[,3],
+     ylim = c(0,1), pch = 15, col =4,
+     ylab = "p-value", xlab = "m",
+     main = "Cross-correlation check")
+abline(h =0.05, col =2)
+grid()
+
+```
+
+From above plot, the p-values of the test statistics are well above the 5% significance level so the fitted model(arima) is adequacy.
+
+```{r arima plot}
+# arima plot
+par(mfrow = c(1,1), cex = 0.75)
+ts.plot(flu.arima$fitted, ylab = "", main ="Arima Plot")
+lines(c(fluTest.obs), pch = 10, col = "green", type ="p")
+grid()
+```
+
+```{r NN}
+mod.nn = forecast::nnetar(fluTest.obs);mod.nn
+mod.nnx = forecast::nnetar(data.obs[,1], xreg = data.obs[,-1]);mod.nnx
+par(mfrow = c(1,1), cex = 0.75)
+ts.plot(mod.nn$fitted, ylab = "", main ="Neural network")
+lines(c(fluTest.obs), pch = 10, col = "green", type ="p")
+grid()
+
+par(mfrow = c(1,1), cex = 0.75)
+ts.plot(mod.nnx$fitted, ylab = "", main ="NNX")
+lines(c(fluTest.obs), pch = 10, col = "green", type ="p")
+grid()
+
+```
+```{r forecasts for four models}
+
+plot(forecast(flu.arima,h = 50, level = c(95)))
+lines(c(rep(NA, 567), fluTest.test[-c(51,52)]),col="green", pch = 18)
+grid()
+
+plot(forecast(mod.tfn, xreg=data.test[,-1], level = (95)))
+lines(c(rep(NA, 567), fluTest.test[-c(51,52)]),col="green", pch = 18)
+grid()
+
+plot(forecast(mod.nn, h = 50, level = (95)))
+lines(c(rep(NA, 567), fluTest.test[-c(51,52)]),col="green", pch = 18)
+grid()
+
+plot(forecast(mod.nnx, h = 50, xreg=data.test[,-1]))
+lines(c(rep(NA, 567), fluTest.test[-c(51,52)]),col="green", pch = 18)
+grid()
+
+```
+
+
+
+```{r forecast performance in training}
+accuracy(flu.arima)
+accuracy(mod.tfn)
+accuracy(mod.nn)
+accuracy(mod.nnx)
+```
+
+In training data \newline
+In ME, the TFN performs the best. \newline
+In RMSE, the NNX performs the best.\newline
+In MAE, the NNX performs the best.\newline
+In MASE, the NNX performs the best.\newline
+In ACF1 the the NN performs the best.\newline
+
+
+Below are test set performance\newline
+
+```{r h=1}
+
+
+arima_forecast <- flu.arima %>%
+  forecast(h = 1)
+accuracy(arima_forecast, x = data.test[,1][1:1])
+
+tfn_forecast <- mod.tfn%>%
+  forecast(h =1, xreg=data.test[,-1] )
+accuracy(tfn_forecast, x = data.test[,1][1:1])
+
+nn_forecast <- mod.nn %>%
+  forecast(h = 1)
+accuracy(nn_forecast, x = data.test[,1][1:1])
+
+nnx_forecast <- mod.nnx%>%
+  forecast(h =1, xreg=data.test[,-1] )
+accuracy(nnx_forecast, x = data.test[,1][1:1])
+
+```
+For h = 1,\newline
+In ME, the ARIMA performs the best. \newline
+In RMSE, the ARIMA performs the best.\newline
+In MAE, the ARIMA performs the best.\newline
+In MPE, the ARIMA performs the best.\newline
+In MAPE, the ARIMA performs the best.\newline
+In MASE, the ARIMA performs the best.\newline
+
+
+```{r h=4}
+arima_forecast <- flu.arima %>%
+  forecast(h = 4)
+accuracy(arima_forecast, x = data.test[,1][1:4])
+
+tfn_forecast <- mod.tfn%>%
+  forecast(h =4, xreg=data.test[,-1] )
+accuracy(tfn_forecast, x = data.test[,1][1:4])
+
+nn_forecast <- mod.nn %>%
+  forecast(h = 4)
+accuracy(nn_forecast, x = data.test[,1][1:4])
+
+nnx_forecast <- mod.nnx%>%
+  forecast(h =4, xreg=data.test[,-1] )
+accuracy(nnx_forecast, x = data.test[,1][1:4])
+```
+For h = 4,\newline
+In ME, the NN performs the best. \newline
+In RMSE, the NN performs the best.\newline
+In MAE, the NNX performs the best.\newline
+In MPE, the NNX performs the best.\newline
+In MAPE, the TFN performs the best.\newline
+In MASE, the NNX performs the best.\newline
+
+
+```{r h=8}
+arima_forecast <- flu.arima %>%
+  forecast(h = 8)
+accuracy(arima_forecast, x = data.test[,1][1:8])
+
+tfn_forecast <- mod.tfn%>%
+  forecast(h =8, xreg=data.test[,-1] )
+accuracy(tfn_forecast, x = data.test[,1][1:8])
+
+nn_forecast <- mod.nn %>%
+  forecast(h = 8)
+accuracy(nn_forecast, x = data.test[,1][1:8])
+
+nnx_forecast <- mod.nnx%>%
+  forecast(h =8, xreg=data.test[,-1] )
+accuracy(nnx_forecast, x = data.test[,1][1:8])
+
+```
+For h = 8,\newline
+In ME, the ARIMA performs the best. \newline
+In RMSE, the TFN performs the best.\newline
+In MAE, the TFN performs the best.\newline
+In MPE, the NN performs the best.\newline
+In MAPE, the TFN performs the best.\newline
+In MASE, the TFN performs the best.\newline
+
+
+```{r h=50}
+arima_forecast <- flu.arima %>%
+  forecast(h = 50)
+accuracy(arima_forecast, x = data.test[,1][1:50])
+
+tfn_forecast <- mod.tfn%>%
+  forecast(h =50, xreg=data.test[,-1] )
+accuracy(tfn_forecast, x = data.test[,1][1:50])
+
+nn_forecast <- mod.nn %>%
+  forecast(h = 50)
+accuracy(nn_forecast, x = data.test[,1][1:50])
+
+nnx_forecast <- mod.nnx%>%
+  forecast(h =50, xreg=data.test[,-1] )
+accuracy(nnx_forecast, x = data.test[,1][1:50])
+
+```
+For h = 50,\newline
+In ME, the TFN performs the best.\newline 
+In RMSE, the TFN performs the best.\newline
+In MAE, the TFN performs the best.\newline
+In MPE, the ARIMA performs the best.\newline
+In MAPE, the TFN performs the best.\newline
+In MASE, the TFN performs the best.\newline
